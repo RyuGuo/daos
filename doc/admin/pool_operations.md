@@ -41,6 +41,10 @@ $ dmg pool create --help
       -n, --nvme-size= Per-server NVMe allocation for DAOS pool (manual)
       -r, --ranks=     Storage server unique identifiers (ranks) for DAOS pool
       -S, --sys=       DAOS system that pool is to be a part of (default: daos_server)
+      -d, --scrub      Checksum scrubbing schedule (off, wait, cont, once, 
+      no-yield)
+      -b, --scrub_freq Checksum scrubbing schedule frequency
+      -c, --scrub_cred Checksum scrubbing credits
 ```
 
 The typical output of this command is as follows:
@@ -103,6 +107,9 @@ a106d667-5c5d-4d6f-ac3a-89099196c41a	0
 | `DAOS_PROP_PO_SPACE_RB`  | Space reserved on each target for rebuild purpose|
 | `DAOS_PROP_PO_SELF_HEAL` | Define whether the pool wants automatically-trigger or manually-triggered self-healing|
 | `DAOS_PROP_PO_RECLAIM`   | Tune space reclaim strategy based on time interval, io activities|
+| `DAOS_PROP_PO_SCRUB_SCHED` | Schedule that the checksum scrubber will run. See DAOS_SCRUBBER_SCHED_* |
+| `DAOS_PROP_PO_SCRUB_FREQ` | How frequently the schedule will run in seconds |
+| `DAOS_PROP_PO_SCRUB_CREDITS` | Number of credits consumed before scrubber will yield/sleep |
 
 At creation time, currently only ACL may be specified via dmg pool create.
 

@@ -181,9 +181,36 @@ out:
 	mgmt__group_update_req__free_unpacked(req, &alloc.alloc);
 }
 
+static uint32_t
+pb2scrub_val(Mgmt__PoolCreateReq__ScrubScheds scheds)
+{
+	uint32_t scrub_val = DAOS_SCRUB_SCHED_OFF;
+
+	switch (scheds) {
+	case MGMT__POOL_CREATE_REQ__SCRUB_SCHEDS__wait:
+		scrub_val = DAOS_SCRUB_SCHED_RUN_WAIT;
+		break;
+	case MGMT__POOL_CREATE_REQ__SCRUB_SCHEDS__continuous:
+		scrub_val = DAOS_SCRUB_SCHED_CONTINUOUS;
+		break;
+	case MGMT__POOL_CREATE_REQ__SCRUB_SCHEDS__run_once:
+		scrub_val = DAOS_SCRUB_SCHED_RUN_ONCE;
+		break;
+	case MGMT__POOL_CREATE_REQ__SCRUB_SCHEDS__no_yield:
+		scrub_val = DAOS_SCRUB_SCHED_RUN_ONCE_NO_YIELD;
+		break;
+	case MGMT__POOL_CREATE_REQ__SCRUB_SCHEDS__off:
+	default:
+		break;
+	}
+
+	return scrub_val;
+}
+
 static int
 create_pool_props(daos_prop_t **out_prop, char *owner, char *owner_grp,
-		  char *label, const char **ace_list, size_t ace_nr)
+		  char *label, const char **ace_list, size_t ace_nr,
+		  Mgmt__PoolCreateReq__ScrubScheds scheds)
 {
 	char		*out_owner = NULL;
 	char		*out_owner_grp = NULL;
@@ -226,6 +253,10 @@ create_pool_props(daos_prop_t **out_prop, char *owner, char *owner_grp,
 		entries++;
 	}
 
+	if (pb2scrub_val(scheds) > 0) {
+		entries++;
+	}
+
 	if (entries == 0) {
 		D_ERROR("No prop entries provided, aborting!\n");
 		D_GOTO(err_out, rc = -DER_INVAL);
@@ -256,6 +287,12 @@ create_pool_props(daos_prop_t **out_prop, char *owner, char *owner_grp,
 	if (out_acl != NULL) {
 		new_prop->dpp_entries[idx].dpe_type = DAOS_PROP_PO_ACL;
 		new_prop->dpp_entries[idx].dpe_val_ptr = out_acl;
+		idx++;
+	}
+
+	if (pb2scrub_val(scheds) > 0) {
+		new_prop->dpp_entries[idx].dpe_type = DAOS_PROP_PO_SCRUB_SCHED;
+		new_prop->dpp_entries[idx].dpe_val = pb2scrub_val(scheds);
 		idx++;
 	}
 
@@ -312,7 +349,9 @@ ds_mgmt_drpc_pool_create(Drpc__Call *drpc_req, Drpc__Response *drpc_resp)
 	D_DEBUG(DB_MGMT, DF_UUID": creating pool\n", DP_UUID(pool_uuid));
 
 	rc = create_pool_props(&prop, req->user, req->usergroup, req->label,
-			       (const char **)req->acl, req->n_acl);
+			       (const char **) req->acl, req->n_acl,
+			       req->scrubsched);
+
 	if (rc != 0)
 		goto out;
 

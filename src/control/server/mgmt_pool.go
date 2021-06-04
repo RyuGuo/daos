@@ -7,6 +7,7 @@
 package server
 
 import (
+	"fmt"
 	"math/rand"
 	"sort"
 	"strings"
@@ -651,6 +652,24 @@ func resolvePoolPropVal(req *mgmtpb.PoolSetPropReq) (*mgmtpb.PoolSetPropReq, err
 		default:
 			return nil, errors.Errorf("unhandled self_heal type %q", healType)
 		}
+	case "scrub":
+		scrubType := strings.ToLower(strings.TrimSpace(req.GetStrval()))
+		var schedule map[string]mgmtpb.PoolCreateReq_ScrubScheds
+
+		schedule = make(map[string]mgmtpb.PoolCreateReq_ScrubScheds)
+		// Duplicate of parseScrubOptions()
+		schedule["off"] = mgmtpb.PoolCreateReq_off
+		schedule["wait"] = mgmtpb.PoolCreateReq_wait
+		schedule["continuous"] = mgmtpb.PoolCreateReq_continuous
+		schedule["run_once"] = mgmtpb.PoolCreateReq_run_once
+		schedule["no_yield"] = mgmtpb.PoolCreateReq_no_yield
+
+		scheduleType, found := schedule[scrubType]
+		if !found {
+			return nil, errors.New(fmt.Sprintf("Scrubbing Schedule Invalid Value: '%s'", scrubType))
+		}
+		newReq.SetPropertyNumber(drpc.PoolPropertyScrubSched)
+		newReq.SetValueNumber(uint64(scheduleType))
 	default:
 		return nil, errors.Errorf("unhandled pool property %q", propName)
 	}

@@ -51,6 +51,7 @@ At creation time, a list of container properties can be specified:
 | `DAOS_PROP_CO_CSUM`               | Checksum off, or algorithm to use.|
 | `DAOS_PROP_CO_CSUM_CHUNK_SIZE`    | Checksum chunk size.|
 | `DAOS_PROP_CO_CSUM_SERVER_VERIFY` | Perform additional checksum verification on server (default: off).|
+| `DAOS_PROP_CO_SCRUBBER_DISABLED`  | Override the pool scrubbing property |
 | `DAOS_PROP_CO_SNAPSHOT_MAX`       | Impose a limit on number of snapshots to retain (default: 0, no limitation).|
 | `DAOS_PROP_CO_ACL                 | Container access control list.|
 | `DAOS_PROP_CO_OWNER`              | User acting as the owner of the container.|
@@ -149,6 +150,12 @@ during container create.
 !!! note
     Note that currently, once a container is created, its checksum configuration
     cannot be changed.
+    
+### Checksum Background Scrubbing
+A pool ULT can be configured to scan the VOS trees to discover silent data
+corruption proactively. (see data_integrity.md for more details). This can be
+disabled per container using the ```DAOS_PROP_CO_SCRUBBER_DISABLED``` container
+property.
 
 ## Inline Deduplication (Preview)
 

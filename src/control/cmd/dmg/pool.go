@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"fmt"
+	mgmtpb "github.com/daos-stack/daos/src/control/common/proto/mgmt"
 	"os"
 	"strconv"
 	"strings"
@@ -60,6 +61,9 @@ type PoolCreateCmd struct {
 	ScmSize    string  `short:"s" long:"scm-size" description:"Per-server SCM allocation for DAOS pool (manual)"`
 	NVMeSize   string  `short:"n" long:"nvme-size" description:"Per-server NVMe allocation for DAOS pool (manual)"`
 	RankList   string  `short:"r" long:"ranks" description:"Storage server unique identifiers (ranks) for DAOS pool"`
+	ScrubSched string  `short:"d" long:"scrub" description:"Checksum scrubbing schedule"`
+	ScrubFreq  string  `short:"b" long:"scrub-freq" description:"Checksum scrubbing schedule frequency"`
+	ScrubCred  string  `short:"c" long:"scrub-cred" description:"Checksum scrubbing schedule credits"`
 }
 
 // Execute is run when PoolCreateCmd subcommand is activated
@@ -77,6 +81,11 @@ func (cmd *PoolCreateCmd) Execute(args []string) error {
 		UserGroup:  cmd.GroupName,
 		Label:      cmd.PoolLabel,
 		NumSvcReps: cmd.NumSvcReps,
+	}
+
+	err = cmd.parseScrubOptions(req)
+	if err != nil {
+		return err
 	}
 
 	if cmd.ACLFile != "" {
@@ -155,6 +164,45 @@ func (cmd *PoolCreateCmd) Execute(args []string) error {
 		return err
 	}
 	cmd.log.Info(bld.String())
+
+	return nil
+}
+
+func (cmd *PoolCreateCmd) parseScrubOptions(req *control.PoolCreateReq) error {
+	var err error
+	var found bool
+	var tmp int
+	var schedule map[string]mgmtpb.PoolCreateReq_ScrubScheds
+
+	// Valid values for scrubber
+	schedule = make(map[string]mgmtpb.PoolCreateReq_ScrubScheds)
+	schedule["off"] = mgmtpb.PoolCreateReq_off
+	schedule["wait"] = mgmtpb.PoolCreateReq_wait
+	schedule["continuous"] = mgmtpb.PoolCreateReq_continuous
+	schedule["run_once"] = mgmtpb.PoolCreateReq_run_once
+	schedule["no_yield"] = mgmtpb.PoolCreateReq_no_yield
+
+	req.ScrubSched, found = schedule[strings.ToLower(cmd.ScrubSched)]
+
+	if cmd.ScrubSched != "" && !found {
+		return errors.New(fmt.Sprintf("Scrubbing Schedule Invalid Value: '%s'", cmd.ScrubSched))
+	}
+
+	if (cmd.ScrubFreq != "") {
+		tmp, err = strconv.Atoi(cmd.ScrubFreq)
+		if err != nil {
+			return errors.New(fmt.Sprintf("Scrubbing Frequency Invalid Value: '%s'", cmd.ScrubFreq))
+		}
+		req.ScrubFreq = uint32(tmp)
+	}
+
+	if (cmd.ScrubCred != "") {
+		tmp, err = strconv.Atoi(cmd.ScrubCred)
+		if err != nil {
+			return errors.New(fmt.Sprintf("Scrubbing Credits Invalid Value: '%s'", cmd.ScrubFreq))
+		}
+		req.ScrubCred = uint32(tmp)
+	}
 
 	return nil
 }

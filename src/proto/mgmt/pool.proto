@@ -33,6 +33,16 @@ message PoolCreateReq {
 	repeated uint32 ranks = 12; // target ranks (manual config)
 	uint64 scmbytes = 13; // SCM size in bytes (manual config)
 	uint64 nvmebytes = 14; // NVMe size in bytes (manual config)
+	enum Scrub_scheds { // Should match DAOS_SCRUB_SCHED_...
+		off = 0;
+		wait = 1;
+		continuous = 2;
+		run_once = 3;
+		no_yield = 4;
+	}
+	Scrub_scheds scrubsched = 15; // Checksum scrubbing schedule (manual config)
+	uint32 scrubfreq = 16; // checksum scrubbing frequency (manual config)
+	uint32 scrubcred = 17; // checksum scrubbing credits (manual config)
 }
 
 // PoolCreateResp returns created pool uuid and ranks.
@@ -202,6 +212,10 @@ message PoolRebuildStatus {
 	State state = 2;
 	uint64 objects = 3;
 	uint64 records = 4;
+}
+
+message PoolScrubberInfo {
+	uint32 schedule = 1;
 }
 
 // PoolQueryResp represents a pool query response.

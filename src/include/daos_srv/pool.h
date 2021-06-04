@@ -99,6 +99,10 @@ struct ds_pool {
 
 	struct ds_pool_metrics *sp_metrics; /* Metrics for this pool */
 
+	/* checksum scrubbing properties */
+	uint64_t		sp_scrub_sched;
+	uint64_t		sp_scrub_freq;
+	uint64_t		sp_scrub_cred;
 };
 
 struct ds_pool *ds_pool_lookup(const uuid_t uuid);
