@@ -8,14 +8,11 @@ package main
 
 import (
 	"context"
-	"strings"
 	"sync"
 
 	"github.com/pkg/errors"
-	"google.golang.org/protobuf/proto"
 
 	mgmtpb "github.com/daos-stack/daos/src/control/common/proto/mgmt"
-	"github.com/daos-stack/daos/src/control/drpc"
 	"github.com/daos-stack/daos/src/control/lib/atm"
 	"github.com/daos-stack/daos/src/control/lib/netdetect"
 	"github.com/daos-stack/daos/src/control/logging"
@@ -28,189 +25,248 @@ const (
 	defaultDomain        = "lo"
 )
 
+func newAttachInfoCache(log logging.Logger, enabled bool) *attachInfoCache {
+	return &attachInfoCache{
+		log:     log,
+		enabled: atm.NewBool(enabled),
+	}
+}
+
 type attachInfoCache struct {
-	log logging.Logger
-	// is caching enabled?
-	enabled atm.Bool
-	// is the cache initialized?
+	mutex sync.Mutex
+
+	log         logging.Logger
+	enabled     atm.Bool
 	initialized atm.Bool
-	// maps NUMA affinity and device index to a response
-	numaDeviceMarshResp map[int]map[int][]byte
+
+	// cached response from remote server
+	AttachInfo *mgmtpb.GetAttachInfoResp
+}
+
+// IsEnabled reports whether the cache is enabled.
+func (c *attachInfoCache) IsEnabled() bool {
+	if c == nil {
+		return false
+	}
+
+	return c.enabled.IsTrue()
+}
+
+// IsCached reports whether there is data in the cache.
+func (c *attachInfoCache) IsCached() bool {
+	if c == nil {
+		return false
+	}
+	return c.enabled.IsTrue() && c.initialized.IsTrue()
+}
+
+// Cache preserves the results of a GetAttachInfo remote call.
+func (c *attachInfoCache) Cache(ctx context.Context, resp *mgmtpb.GetAttachInfoResp) error {
+	if c == nil {
+		return errors.New("nil attachInfoCache")
+	}
+
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if !c.IsEnabled() {
+		return errors.New("cache is not enabled")
+	}
+
+	if resp == nil {
+		return errors.New("nil input")
+	}
+
+	c.AttachInfo = resp
+
+	c.initialized.SetTrue()
+	return nil
+}
+
+func newLocalFabricCache(log logging.Logger) *localFabricCache {
+	return &localFabricCache{
+		log:               log,
+		currentNumaDevIdx: make(map[int]int),
+	}
+}
+
+type fabricInterface struct {
+	Name        string
+	Alias       string
+	NetDevClass uint32
+}
+
+type localFabricCache struct {
+	sync.Mutex // Caller should lock and unlock around cache operations
+
+	log         logging.Logger
+	initialized atm.Bool
+	// cached fabric interfaces organized by NUMA affinity
+	localNUMAFabric map[int][]*fabricInterface
 	// maps NUMA affinity to a device index
 	currentNumaDevIdx map[int]int
-	mutex             sync.Mutex
-	// specifies what NUMA node to use when there are no devices
-	// associated with the client NUMA node
-	defaultNumaNode int
+	defaultNumaNode   int // if no NUMA node specified by client
+
+	getDevAlias func(ctx context.Context, devName string) (string, error)
 }
 
-// loadBalance is a simple round-robin load balancing scheme
-// to assign network interface adapters to clients
-// on the same NUMA node that have multiple adapters
-// to choose from.  Returns the index of the device to use.
-func (aic *attachInfoCache) loadBalance(numaNode int) int {
-	aic.mutex.Lock()
-	deviceIndex := invalidIndex
-	numDevs := len(aic.numaDeviceMarshResp[numaNode])
-	if numDevs > 0 {
-		deviceIndex = aic.currentNumaDevIdx[numaNode]
-		aic.currentNumaDevIdx[numaNode] = (deviceIndex + 1) % numDevs
+// IsCached reports whether there is data in the cache.
+func (c *localFabricCache) IsCached() bool {
+	if c == nil {
+		return false
 	}
-	aic.mutex.Unlock()
-	return deviceIndex
+
+	return c.initialized.IsTrue()
 }
 
-// selectRemote is called when no local network adapters
-// was detected on the local NUMA node and we need to pick
-// one attached to a remote NUMA node. Some balancing is
-// still required here to avoid overloading a specific interface
-func (aic *attachInfoCache) selectRemote() (int, int) {
-	aic.mutex.Lock()
-	defer aic.mutex.Unlock()
-
-	deviceIndex := invalidIndex
-	// restart from previous NUMA node
-	numaNode := aic.defaultNumaNode
-
-	if len(aic.numaDeviceMarshResp) == 0 {
-		aic.log.Infof("No network device available")
-		return numaNode, deviceIndex
+// Cache caches the results of a fabric scan locally.
+func (c *localFabricCache) Cache(ctx context.Context, scan []*netdetect.FabricScan) error {
+	if c == nil {
+		return errors.New("nil localFabricCache")
 	}
 
-	for i := 1; i <= len(aic.numaDeviceMarshResp); i++ {
-		node := (numaNode + i) % len(aic.numaDeviceMarshResp)
-		numDevs := len(aic.numaDeviceMarshResp[node])
-		if numDevs > 0 {
-			numaNode = node
-			deviceIndex = aic.currentNumaDevIdx[numaNode]
-			aic.currentNumaDevIdx[numaNode] = (deviceIndex + 1) % numDevs
-			break
-		}
+	if c.getDevAlias == nil {
+		c.getDevAlias = netdetect.GetDeviceAlias
 	}
 
-	// update the default with the one we finally picked
-	aic.defaultNumaNode = numaNode
+	c.localNUMAFabric = make(map[int][]*fabricInterface)
 
-	return numaNode, deviceIndex
-}
-
-func (aic *attachInfoCache) getResponse(numaNode int) ([]byte, error) {
-	deviceIndex := aic.loadBalance(numaNode)
-	// If there is no response available for the client's actual NUMA node,
-	// use the default NUMA node
-	if deviceIndex == invalidIndex {
-		var numaSel int
-
-		numaSel, deviceIndex = aic.selectRemote()
-		if deviceIndex == invalidIndex {
-			return nil, errors.Errorf("No fallback network device found")
-		}
-		aic.log.Infof("No network devices bound to client NUMA node %d.  Using response from NUMA %d", numaNode, numaSel)
-		numaNode = numaSel
-	}
-
-	aic.mutex.Lock()
-	defer aic.mutex.Unlock()
-	numaDeviceMarshResp, ok := aic.numaDeviceMarshResp[numaNode][deviceIndex]
-	if !ok {
-		return nil, errors.Errorf("GetAttachInfo entry for numaNode %d device index %d did not exist", numaNode, deviceIndex)
-	}
-
-	aic.log.Debugf("Retrieved response for NUMA %d with device index %d\n", numaNode, deviceIndex)
-	return numaDeviceMarshResp, nil
-}
-
-func (aic *attachInfoCache) isCached() bool {
-	return aic.enabled.IsTrue() && aic.initialized.IsTrue()
-}
-
-// initResponseCache generates a unique dRPC response corresponding to each device specified
-// in the scanResults.  The responses are differentiated based on the network device NUMA affinity.
-func (aic *attachInfoCache) initResponseCache(ctx context.Context, resp *mgmtpb.GetAttachInfoResp, scanResults []*netdetect.FabricScan) error {
-	aic.mutex.Lock()
-	defer aic.mutex.Unlock()
-
-	// Make a new map each time the cache is initialized
-	aic.numaDeviceMarshResp = make(map[int]map[int][]byte)
-
-	// Make a new map just once.
-	// Preserve any previous device index map in order to maintain ability to load balance
-	if len(aic.currentNumaDevIdx) == 0 {
-		aic.currentNumaDevIdx = make(map[int]int)
-	}
-
-	var haveDefaultNuma bool
-
-	hint := resp.ClientNetHint
-	if hint == nil {
-		return errors.New("no client networking hint in response")
-	}
-	for _, fs := range scanResults {
+	for _, fs := range scan {
 		if fs.DeviceName == "lo" {
 			continue
 		}
 
-		if fs.NetDevClass != hint.NetDevClass {
-			aic.log.Debugf("Excluding device: %s, network device class: %s from attachInfoCache.  Does not match server network device class: %s\n",
-				fs.DeviceName, netdetect.DevClassName(fs.NetDevClass), netdetect.DevClassName(hint.NetDevClass))
-			continue
+		haveDefaultNuma := false
+
+		newIF := &fabricInterface{
+			Name:        fs.DeviceName,
+			NetDevClass: fs.NetDevClass,
 		}
 
-		hint.Interface = fs.DeviceName
-		// by default, the domain is the deviceName
-		hint.Domain = fs.DeviceName
-		if strings.HasPrefix(hint.Provider, verbsProvider) {
-			deviceAlias, err := netdetect.GetDeviceAlias(ctx, hint.Interface)
-			if err != nil {
-				aic.log.Debugf("non-fatal error: %v. unable to determine OFI_DOMAIN for %s", err, hint.Interface)
-			} else {
-				hint.Domain = deviceAlias
-				aic.log.Debugf("OFI_DOMAIN has been detected as: %s", hint.Domain)
-			}
+		deviceAlias, err := c.getDevAlias(ctx, newIF.Name)
+		if err != nil {
+			c.log.Debugf("Non-fatal error: failed to get device alias for %q: %v", newIF.Name, err)
+		} else {
+			newIF.Alias = deviceAlias
 		}
 
 		numa := int(fs.NUMANode)
-
-		numaDeviceMarshResp, err := proto.Marshal(resp)
-		if err != nil {
-			return drpc.MarshalingFailure()
-		}
-
-		if _, ok := aic.numaDeviceMarshResp[numa]; !ok {
-			aic.numaDeviceMarshResp[numa] = make(map[int][]byte)
-		}
-		aic.numaDeviceMarshResp[numa][len(aic.numaDeviceMarshResp[numa])] = numaDeviceMarshResp
+		c.localNUMAFabric[numa] = append(c.localNUMAFabric[numa], newIF)
 
 		// Any client bound to a NUMA node that has no network devices associated with it will
 		// get a response from this defaultNumaNode.
 		// This response offers a valid network device at degraded performance for those clients
 		// that need it.
 		if !haveDefaultNuma {
-			aic.defaultNumaNode = numa
+			c.defaultNumaNode = numa
 			haveDefaultNuma = true
-			aic.log.Debugf("The default NUMA node is: %d", aic.defaultNumaNode)
+			c.log.Debugf("The default NUMA node is: %d", c.defaultNumaNode)
 		}
 
-		aic.log.Debugf("Added device %s, domain %s for NUMA %d, device number %d\n", hint.Interface, hint.Domain, numa, len(aic.numaDeviceMarshResp[numa])-1)
+		c.log.Debugf("Added device %q, alias %q for NUMA %d, device number %d",
+			newIF.Name, newIF.Alias, numa, len(c.localNUMAFabric[numa])-1)
 	}
 
-	// If there were no network devices found, then add a default response to the default NUMA node entry
-	if _, ok := aic.numaDeviceMarshResp[aic.defaultNumaNode]; !ok {
-		aic.log.Info("No network devices detected in fabric scan; default AttachInfo response may be incorrect\n")
-		aic.numaDeviceMarshResp[aic.defaultNumaNode] = make(map[int][]byte)
-		hint.Interface = defaultNetworkDevice
-		hint.Domain = defaultDomain
-		numaDeviceMarshResp, err := proto.Marshal(resp)
-		if err != nil {
-			return drpc.MarshalingFailure()
+	if _, exists := c.localNUMAFabric[c.defaultNumaNode]; !exists {
+		c.log.Info("No network devices detected in fabric scan; default AttachInfo response may be incorrect\n")
+
+		defaultIF := &fabricInterface{
+			Name: defaultNetworkDevice,
 		}
-		aic.numaDeviceMarshResp[aic.defaultNumaNode][0] = numaDeviceMarshResp
+		c.localNUMAFabric[c.defaultNumaNode] = append(c.localNUMAFabric[c.defaultNumaNode], defaultIF)
 	}
 
-	// If caching is enabled, the cache is now 'initialized'
-	if aic.enabled.IsTrue() {
-		aic.initialized.SetTrue()
-	}
-
+	c.initialized.SetTrue()
 	return nil
+}
+
+// loadBalance is a simple round-robin load balancing scheme
+// to assign network interface adapters to clients
+// on the same NUMA node that have multiple adapters
+// to choose from.  Returns the index of the device to use.
+func (c *localFabricCache) loadBalance(numaNode int) int {
+	deviceIndex := invalidIndex
+	numDevs := len(c.localNUMAFabric[numaNode])
+	if numDevs > 0 {
+		deviceIndex = c.currentNumaDevIdx[numaNode]
+		c.currentNumaDevIdx[numaNode] = (deviceIndex + 1) % numDevs
+	}
+	return deviceIndex
+}
+
+func (c *localFabricCache) GetDevice(numaNode int, netDevClass uint32) (*fabricInterface, error) {
+	if c == nil {
+		return nil, errors.New("nil localFabricCache")
+	}
+
+	if !c.IsCached() {
+		return nil, errors.New("fabric data not cached")
+	}
+
+	for checked := 0; checked < len(c.localNUMAFabric[numaNode]); checked++ {
+		fabricIF, err := c.getNextDevice(numaNode)
+		if err != nil {
+			return nil, err
+		}
+
+		if fabricIF.NetDevClass != netDevClass {
+			c.log.Debugf("Excluding device: %s, network device class: %s from attachInfoCache. Does not match network device class: %s",
+				fabricIF.Name, netdetect.DevClassName(fabricIF.NetDevClass), netdetect.DevClassName(netDevClass))
+			continue
+		}
+
+		return fabricIF, nil
+	}
+
+	return nil, errors.New("no suitable fabric interface found")
+}
+
+// selectRemote is called when no local network adapters
+// was detected on the local NUMA node and we need to pick
+// one attached to a remote NUMA node. Some balancing is
+// still required here to avoid overloading a specific interface
+func (c *localFabricCache) selectRemote() (int, int) {
+	deviceIndex := invalidIndex
+	// restart from previous NUMA node
+	numaNode := c.defaultNumaNode
+
+	for i := 1; i <= len(c.localNUMAFabric); i++ {
+		node := (numaNode + i) % len(c.localNUMAFabric)
+		numDevs := len(c.localNUMAFabric[node])
+		if numDevs > 0 {
+			numaNode = node
+			deviceIndex = c.currentNumaDevIdx[numaNode]
+			c.currentNumaDevIdx[numaNode] = (deviceIndex + 1) % numDevs
+			break
+		}
+	}
+
+	// update the default with the one we finally picked
+	c.defaultNumaNode = numaNode
+
+	return numaNode, deviceIndex
+}
+
+func (c *localFabricCache) getNextDevice(numaNode int) (*fabricInterface, error) {
+	deviceIndex := c.loadBalance(numaNode)
+
+	// no fabric available for the client's actual NUMA node
+	if deviceIndex == invalidIndex {
+		var numaSel int
+
+		numaSel, deviceIndex = c.selectRemote()
+		if deviceIndex == invalidIndex {
+			return nil, errors.New("No fallback network device found")
+		}
+		c.log.Infof("No network devices bound to client NUMA node %d.  Using response from NUMA %d", numaNode, numaSel)
+		numaNode = numaSel
+	}
+
+	numaFabric := c.localNUMAFabric[numaNode]
+	if len(numaFabric) <= deviceIndex {
+		return nil, errors.Errorf("Device for numaNode %d device index %d did not exist", numaNode, deviceIndex)
+	}
+	fabricIF := numaFabric[deviceIndex]
+
+	return fabricIF, nil
 }
