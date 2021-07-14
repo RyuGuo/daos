@@ -132,10 +132,9 @@ func TestAgent_newLocalFabricCache(t *testing.T) {
 
 	common.AssertEqual(t, log, cache.log, "")
 	common.AssertFalse(t, cache.IsCached(), "default state is uncached")
-	common.AssertEqual(t, len(cache.localNUMAFabric), 0, "")
 }
 
-func newTestFabricCache(t *testing.T, log logging.Logger, cacheMap map[int][]*fabricInterface) *localFabricCache {
+func newTestFabricCache(t *testing.T, log logging.Logger, cacheMap *NUMAFabric) *localFabricCache {
 	t.Helper()
 
 	cache := newLocalFabricCache(log)
@@ -154,7 +153,7 @@ func TestAgent_localFabricCache_Cache(t *testing.T) {
 		input     []*netdetect.FabricScan
 		expErr    error
 		expCached bool
-		expResult map[int][]*fabricInterface
+		expResult *NUMAFabric
 	}{
 		"nil": {
 			expErr: errors.New("nil localFabricCache"),
@@ -162,10 +161,12 @@ func TestAgent_localFabricCache_Cache(t *testing.T) {
 		"no devices in scan": {
 			lfc:       &localFabricCache{},
 			expCached: true,
-			expResult: map[int][]*fabricInterface{
-				0: {
-					{
-						Name: "lo",
+			expResult: &NUMAFabric{
+				numaMap: map[int][]*FabricInterface{
+					0: {
+						{
+							Name: "lo",
+						},
 					},
 				},
 			},
@@ -198,21 +199,23 @@ func TestAgent_localFabricCache_Cache(t *testing.T) {
 				},
 			},
 			expCached: true,
-			expResult: map[int][]*fabricInterface{
-				0: {
-					{
-						Name:        "test1",
-						NetDevClass: netdetect.Infiniband,
+			expResult: &NUMAFabric{
+				numaMap: map[int][]*FabricInterface{
+					0: {
+						{
+							Name:        "test1",
+							NetDevClass: netdetect.Infiniband,
+						},
+						{
+							Name:        "test2",
+							NetDevClass: netdetect.Ether,
+						},
 					},
-					{
-						Name:        "test2",
-						NetDevClass: netdetect.Ether,
-					},
-				},
-				1: {
-					{
-						Name:        "test0",
-						NetDevClass: netdetect.Ether,
+					1: {
+						{
+							Name:        "test0",
+							NetDevClass: netdetect.Ether,
+						},
 					},
 				},
 			},
@@ -244,24 +247,26 @@ func TestAgent_localFabricCache_Cache(t *testing.T) {
 				},
 			},
 			expCached: true,
-			expResult: map[int][]*fabricInterface{
-				1: {
-					{
-						Name:        "test1",
-						NetDevClass: netdetect.Infiniband,
-						Alias:       "test1_alias",
+			expResult: &NUMAFabric{
+				numaMap: map[int][]*FabricInterface{
+					1: {
+						{
+							Name:        "test1",
+							NetDevClass: netdetect.Infiniband,
+							Domain:      "test1_alias",
+						},
+						{
+							Name:        "test2",
+							NetDevClass: netdetect.Ether,
+							Domain:      "test2_alias",
+						},
 					},
-					{
-						Name:        "test2",
-						NetDevClass: netdetect.Ether,
-						Alias:       "test2_alias",
-					},
-				},
-				2: {
-					{
-						Name:        "test0",
-						NetDevClass: netdetect.Ether,
-						Alias:       "test0_alias",
+					2: {
+						{
+							Name:        "test0",
+							NetDevClass: netdetect.Ether,
+							Domain:      "test0_alias",
+						},
 					},
 				},
 			},
@@ -284,7 +289,7 @@ func TestAgent_localFabricCache_Cache(t *testing.T) {
 				return
 			}
 
-			if diff := cmp.Diff(tc.expResult, tc.lfc.localNUMAFabric, cmp.AllowUnexported(fabricInterface{})); diff != "" {
+			if diff := cmp.Diff(tc.expResult, tc.lfc.localNUMAFabric, cmp.AllowUnexported(NUMAFabric{})); diff != "" {
 				t.Fatalf("-want, +got:\n%s", diff)
 			}
 		})
@@ -292,46 +297,48 @@ func TestAgent_localFabricCache_Cache(t *testing.T) {
 }
 
 func TestAgent_localFabricCache_GetDevice(t *testing.T) {
-	populatedCache := map[int][]*fabricInterface{
-		0: {
-			{
-				Name:        "test1",
-				NetDevClass: netdetect.Infiniband,
-				Alias:       "test1_alias",
+	populatedCache := &NUMAFabric{
+		numaMap: map[int][]*FabricInterface{
+			0: {
+				{
+					Name:        "test1",
+					NetDevClass: netdetect.Infiniband,
+					Domain:      "test1_alias",
+				},
+				{
+					Name:        "test2",
+					NetDevClass: netdetect.Ether,
+					Domain:      "test2_alias",
+				},
 			},
-			{
-				Name:        "test2",
-				NetDevClass: netdetect.Ether,
-				Alias:       "test2_alias",
+			1: {
+				{
+					Name:        "test3",
+					NetDevClass: netdetect.Infiniband,
+					Domain:      "test3_alias",
+				},
+				{
+					Name:        "test4",
+					NetDevClass: netdetect.Infiniband,
+					Domain:      "test4_alias",
+				},
+				{
+					Name:        "test5",
+					NetDevClass: netdetect.Ether,
+					Domain:      "test5_alias",
+				},
 			},
-		},
-		1: {
-			{
-				Name:        "test3",
-				NetDevClass: netdetect.Infiniband,
-				Alias:       "test3_alias",
-			},
-			{
-				Name:        "test4",
-				NetDevClass: netdetect.Infiniband,
-				Alias:       "test4_alias",
-			},
-			{
-				Name:        "test5",
-				NetDevClass: netdetect.Ether,
-				Alias:       "test5_alias",
-			},
-		},
-		2: {
-			{
-				Name:        "test6",
-				NetDevClass: netdetect.Ether,
-				Alias:       "test6_alias",
-			},
-			{
-				Name:        "test7",
-				NetDevClass: netdetect.Ether,
-				Alias:       "test7_alias",
+			2: {
+				{
+					Name:        "test6",
+					NetDevClass: netdetect.Ether,
+					Domain:      "test6_alias",
+				},
+				{
+					Name:        "test7",
+					NetDevClass: netdetect.Ether,
+					Domain:      "test7_alias",
+				},
 			},
 		},
 	}
@@ -340,7 +347,7 @@ func TestAgent_localFabricCache_GetDevice(t *testing.T) {
 		lfc         *localFabricCache
 		numaNode    int
 		netDevClass uint32
-		expDevice   *fabricInterface
+		expDevice   *FabricInterface
 		expErr      error
 	}{
 		"nil cache": {
@@ -366,20 +373,20 @@ func TestAgent_localFabricCache_GetDevice(t *testing.T) {
 			lfc:         newTestFabricCache(t, nil, populatedCache),
 			numaNode:    0,
 			netDevClass: netdetect.Infiniband,
-			expDevice: &fabricInterface{
+			expDevice: &FabricInterface{
 				Name:        "test1",
 				NetDevClass: netdetect.Infiniband,
-				Alias:       "test1_alias",
+				Domain:      "test1_alias",
 			},
 		},
 		"later item on node": {
 			lfc:         newTestFabricCache(t, nil, populatedCache),
 			numaNode:    1,
 			netDevClass: netdetect.Ether,
-			expDevice: &fabricInterface{
+			expDevice: &FabricInterface{
 				Name:        "test5",
 				NetDevClass: netdetect.Ether,
-				Alias:       "test5_alias",
+				Domain:      "test5_alias",
 			},
 		},
 	} {
@@ -394,7 +401,7 @@ func TestAgent_localFabricCache_GetDevice(t *testing.T) {
 			dev, err := tc.lfc.GetDevice(tc.numaNode, tc.netDevClass)
 
 			common.CmpErr(t, tc.expErr, err)
-			if diff := cmp.Diff(tc.expDevice, dev, cmp.AllowUnexported(fabricInterface{})); diff != "" {
+			if diff := cmp.Diff(tc.expDevice, dev); diff != "" {
 				t.Fatalf("-want, +got:\n%s", diff)
 			}
 		})

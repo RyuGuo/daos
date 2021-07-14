@@ -152,7 +152,7 @@ func (mod *mgmtModule) getAttachInfo(ctx context.Context, numaNode int, sys stri
 	resp.ClientNetHint.Interface = fabricIF.Name
 	resp.ClientNetHint.Domain = fabricIF.Name
 	if strings.HasPrefix(resp.ClientNetHint.Provider, verbsProvider) {
-		resp.ClientNetHint.Domain = fabricIF.Alias
+		resp.ClientNetHint.Domain = fabricIF.Domain
 		mod.log.Debugf("OFI_DOMAIN for %s has been detected as: %s",
 			resp.ClientNetHint.Interface, resp.ClientNetHint.Domain)
 	}
@@ -200,7 +200,7 @@ func (mod *mgmtModule) getAttachInfoRemote(ctx context.Context, numaNode int, sy
 	return pbResp, nil
 }
 
-func (mod *mgmtModule) getFabricInterface(ctx context.Context, numaNode int, netDevClass uint32) (*fabricInterface, error) {
+func (mod *mgmtModule) getFabricInterface(ctx context.Context, numaNode int, netDevClass uint32) (*FabricInterface, error) {
 	mod.cacheMutex.Lock()
 	defer mod.cacheMutex.Unlock()
 	if mod.fabricCache.IsCached() {

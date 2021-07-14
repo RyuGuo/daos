@@ -90,19 +90,13 @@ func newLocalFabricCache(log logging.Logger) *localFabricCache {
 	}
 }
 
-type fabricInterface struct {
-	Name        string
-	Alias       string
-	NetDevClass uint32
-}
-
 type localFabricCache struct {
 	sync.Mutex // Caller should lock and unlock around cache operations
 
 	log         logging.Logger
 	initialized atm.Bool
 	// cached fabric interfaces organized by NUMA affinity
-	localNUMAFabric map[int][]*fabricInterface
+	localNUMAFabric *NUMAFabric
 	// maps NUMA affinity to a device index
 	currentNumaDevIdx map[int]int
 	defaultNumaNode   int // if no NUMA node specified by client
@@ -129,51 +123,25 @@ func (c *localFabricCache) Cache(ctx context.Context, scan []*netdetect.FabricSc
 		c.getDevAlias = netdetect.GetDeviceAlias
 	}
 
-	c.localNUMAFabric = make(map[int][]*fabricInterface)
+	c.localNUMAFabric = NUMAFabricFromScan(ctx, c.log, scan, c.getDevAlias)
 
-	for _, fs := range scan {
-		if fs.DeviceName == "lo" {
-			continue
-		}
-
-		haveDefaultNuma := false
-
-		newIF := &fabricInterface{
-			Name:        fs.DeviceName,
-			NetDevClass: fs.NetDevClass,
-		}
-
-		deviceAlias, err := c.getDevAlias(ctx, newIF.Name)
-		if err != nil {
-			c.log.Debugf("Non-fatal error: failed to get device alias for %q: %v", newIF.Name, err)
-		} else {
-			newIF.Alias = deviceAlias
-		}
-
-		numa := int(fs.NUMANode)
-		c.localNUMAFabric[numa] = append(c.localNUMAFabric[numa], newIF)
-
-		// Any client bound to a NUMA node that has no network devices associated with it will
-		// get a response from this defaultNumaNode.
-		// This response offers a valid network device at degraded performance for those clients
-		// that need it.
+	haveDefaultNuma := false
+	for numa := range c.localNUMAFabric.numaMap {
 		if !haveDefaultNuma {
 			c.defaultNumaNode = numa
 			haveDefaultNuma = true
 			c.log.Debugf("The default NUMA node is: %d", c.defaultNumaNode)
+			break
 		}
-
-		c.log.Debugf("Added device %q, alias %q for NUMA %d, device number %d",
-			newIF.Name, newIF.Alias, numa, len(c.localNUMAFabric[numa])-1)
 	}
 
-	if _, exists := c.localNUMAFabric[c.defaultNumaNode]; !exists {
+	if _, exists := c.localNUMAFabric.numaMap[c.defaultNumaNode]; !exists {
 		c.log.Info("No network devices detected in fabric scan; default AttachInfo response may be incorrect\n")
 
-		defaultIF := &fabricInterface{
+		defaultIF := &FabricInterface{
 			Name: defaultNetworkDevice,
 		}
-		c.localNUMAFabric[c.defaultNumaNode] = append(c.localNUMAFabric[c.defaultNumaNode], defaultIF)
+		c.localNUMAFabric.Add(c.defaultNumaNode, defaultIF)
 	}
 
 	c.initialized.SetTrue()
@@ -186,7 +154,7 @@ func (c *localFabricCache) Cache(ctx context.Context, scan []*netdetect.FabricSc
 // to choose from.  Returns the index of the device to use.
 func (c *localFabricCache) loadBalance(numaNode int) int {
 	deviceIndex := invalidIndex
-	numDevs := len(c.localNUMAFabric[numaNode])
+	numDevs := c.localNUMAFabric.NumDevices(numaNode)
 	if numDevs > 0 {
 		deviceIndex = c.currentNumaDevIdx[numaNode]
 		c.currentNumaDevIdx[numaNode] = (deviceIndex + 1) % numDevs
@@ -194,7 +162,7 @@ func (c *localFabricCache) loadBalance(numaNode int) int {
 	return deviceIndex
 }
 
-func (c *localFabricCache) GetDevice(numaNode int, netDevClass uint32) (*fabricInterface, error) {
+func (c *localFabricCache) GetDevice(numaNode int, netDevClass uint32) (*FabricInterface, error) {
 	if c == nil {
 		return nil, errors.New("nil localFabricCache")
 	}
@@ -203,7 +171,7 @@ func (c *localFabricCache) GetDevice(numaNode int, netDevClass uint32) (*fabricI
 		return nil, errors.New("fabric data not cached")
 	}
 
-	for checked := 0; checked < len(c.localNUMAFabric[numaNode]); checked++ {
+	for checked := 0; checked < c.localNUMAFabric.NumDevices(numaNode); checked++ {
 		fabricIF, err := c.getNextDevice(numaNode)
 		if err != nil {
 			return nil, err
@@ -226,13 +194,14 @@ func (c *localFabricCache) GetDevice(numaNode int, netDevClass uint32) (*fabricI
 // one attached to a remote NUMA node. Some balancing is
 // still required here to avoid overloading a specific interface
 func (c *localFabricCache) selectRemote() (int, int) {
+	n := c.localNUMAFabric
 	deviceIndex := invalidIndex
 	// restart from previous NUMA node
 	numaNode := c.defaultNumaNode
 
-	for i := 1; i <= len(c.localNUMAFabric); i++ {
-		node := (numaNode + i) % len(c.localNUMAFabric)
-		numDevs := len(c.localNUMAFabric[node])
+	for i := 1; i <= n.NumNUMANodes(); i++ {
+		node := (numaNode + i) % n.NumNUMANodes()
+		numDevs := n.NumDevices(node)
 		if numDevs > 0 {
 			numaNode = node
 			deviceIndex = c.currentNumaDevIdx[numaNode]
@@ -247,7 +216,7 @@ func (c *localFabricCache) selectRemote() (int, int) {
 	return numaNode, deviceIndex
 }
 
-func (c *localFabricCache) getNextDevice(numaNode int) (*fabricInterface, error) {
+func (c *localFabricCache) getNextDevice(numaNode int) (*FabricInterface, error) {
 	deviceIndex := c.loadBalance(numaNode)
 
 	// no fabric available for the client's actual NUMA node
@@ -262,7 +231,7 @@ func (c *localFabricCache) getNextDevice(numaNode int) (*fabricInterface, error)
 		numaNode = numaSel
 	}
 
-	numaFabric := c.localNUMAFabric[numaNode]
+	numaFabric := c.localNUMAFabric.numaMap[numaNode]
 	if len(numaFabric) <= deviceIndex {
 		return nil, errors.Errorf("Device for numaNode %d device index %d did not exist", numaNode, deviceIndex)
 	}
