@@ -14,7 +14,7 @@
 
 Name:          daos
 Version:       1.3.103
-Release:       2%{?relval}%{?dist}
+Release:       3%{?relval}%{?dist}
 Summary:       DAOS Storage Engine
 
 License:       BSD-2-Clause-Patent
@@ -460,6 +460,9 @@ getent passwd daos_agent >/dev/null || useradd -s /sbin/nologin -r -g daos_agent
 %attr(4750,root,daos_server) %{_bindir}/daos_firmware
 
 %changelog
+* Wed Jul 14 2021 Li Wei <wei.g.li@intel.com> 1.3.103-3
+- Update raft to fix slow leader re-elections
+
 * Mon Jul 12 2021 Alexander Oganezov <alexander.a.oganezov@intel.com> 1.3.103-2
 - Update to mercury release v2.0.1
 
